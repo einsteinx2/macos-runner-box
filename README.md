@@ -10,3 +10,9 @@ Turns a spare MacBook (in my case an M1 Air with a broken screen) into a headles
 4. From another machine, get a runner registration token from *Settings → Actions → Runners → New self-hosted runner*. It's valid for one hour and registers all four runners.
 5. On the Mac, run `./setup-runner-mac.sh` and paste the two tokens when prompted (or pass `REG_TOKEN=... WATCHDOG_TOKEN=...`).
 6. Verify with `launchctl list | grep -E 'actions.runner|com.ben'` and `tail -f ~/Library/Logs/runner-watchdog.log`, then close the lid.
+
+## Pausing the runners
+
+To take the runners offline without shutting down the Mac, run `./runners-stop.sh`. It stops the watchdog first, because the watchdog otherwise restarts runners that GitHub reports as offline. The script refuses to stop while a runner is in the middle of a job; pass `--force` to stop anyway (that job fails). The services come back at the next login unless you also pass `--persist`, which disables them until you start them again.
+
+Run `./runners-start.sh` to bring everything back. It starts the runners before the watchdog and clears the watchdog's old strike counts. The power settings and the `caffeinate` daemon are not touched, so the Mac stays awake and reachable over SSH while the runners are stopped.
