@@ -98,15 +98,20 @@ for dir in "$HOME"/actions-runner-*; do
   [ "$i" -gt "$RUNNER_COUNT" ] && extras+=("$i")
 done
 
-# Runner.Worker only exists while a runner executes a job.
+# Runner.Worker only exists while a runner executes a job. The pattern has no
+# $HOME prefix, because the process path differs from $HOME if $HOME holds a symlink.
 stop_if_busy() {
-  if pgrep -u "$(id -u)" -f "$HOME/actions-runner-$1/bin/Runner.Worker" >/dev/null; then
+  if pgrep -u "$(id -u)" -f "/actions-runner-$1/bin/Runner\.Worker" >/dev/null; then
     echo "$RUNNER_PREFIX$1 is busy with a job. Wait for it to finish, then run this script again." >&2
     exit 1
   fi
 }
 
-# Check all the extra runners before the script changes anything.
+if [ "${#extras[@]}" -gt 0 ]; then
+  echo "Runners above the count of $RUNNER_COUNT, to remove: ${extras[*]/#/$RUNNER_PREFIX}"
+fi
+
+# Check all the extra runners before the script removes a runner.
 need_remove_token=0
 for i in ${extras[@]+"${extras[@]}"}; do
   dir="$HOME/actions-runner-$i"
