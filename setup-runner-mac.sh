@@ -163,17 +163,25 @@ fi
 for i in $(seq 1 "$RUNNER_COUNT"); do
   name="$RUNNER_PREFIX$i"
   dir="$HOME/actions-runner-$i"
-  if [ -f "$dir/.runner" ]; then
+  # svc.sh install writes .service. A runner with .runner but no .service is
+  # registered but has no LaunchAgent, because an earlier run failed after config.sh.
+  if [ -f "$dir/.runner" ] && [ -f "$dir/.service" ]; then
     echo "$name already configured in $dir — skipping"
     continue
   fi
-  mkdir -p "$dir"
-  tar xzf "$TARBALL" -C "$dir"
+  if [ -f "$dir/.runner" ]; then
+    echo "$name is registered but has no service — installing the service"
+  else
+    mkdir -p "$dir"
+    tar xzf "$TARBALL" -C "$dir"
+  fi
   (
     cd "$dir"
-    ./config.sh --url "$RUNNER_URL" --token "$REG_TOKEN" --name "$name" \
-      --labels "$LABELS" --unattended --replace
-    ./svc.sh install     # creates ~/Library/LaunchAgents/actions.runner.<scope>.<name>.plist with KeepAlive
+    if [ ! -f .runner ]; then
+      ./config.sh --url "$RUNNER_URL" --token "$REG_TOKEN" --name "$name" \
+        --labels "$LABELS" --unattended --replace
+    fi
+    ./svc.sh install    # creates ~/Library/LaunchAgents/actions.runner.<scope>.<name>.plist with KeepAlive
     ./svc.sh start
   )
 done
