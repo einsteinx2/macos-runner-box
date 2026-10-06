@@ -6,12 +6,23 @@
 # Run as the user that will own the runners; it sudos for the power settings
 # and the caffeinate daemon. Safe to re-run — configured runners are skipped.
 #
+# Usage: ./setup-runner-mac.sh [runner-count]
+# A re-run reconciles the host to the runner count: it adds the missing
+# runners and removes the runners with a number above the count. The argument
+# overrides RUNNER_COUNT below for one run; it is not saved.
+#
 # Registration tokens: generate them on your own machine, not here.
 #   Org:  https://github.com/organizations/ORG/settings/actions/runners/new
 #   Repo: https://github.com/OWNER/REPO/settings/actions/runners/new
 #   (or: gh api -X POST orgs/ORG/actions/runners/registration-token --jq .token)
-# They expire after 1 hour, and one token can register all four runners in
+# They expire after 1 hour, and one token can register all the runners in
 # that window. The script prompts for it; pass REG_TOKEN=... to skip the prompt.
+#
+# Removal tokens: only needed when the script removes runners. This is not the
+# registration token. Get it from the "Remove" dialog of a runner on GitHub
+#   (or: gh api -X POST orgs/ORG/actions/runners/remove-token --jq .token)
+# It expires after 1 hour, and one token can remove all the extra runners in
+# that window. The script prompts for it; pass REMOVE_TOKEN=... to skip the prompt.
 #
 # Watchdog token: a fine-grained PAT with ONLY
 #   org runners:  Organization permissions -> Self-hosted runners: Read-only
@@ -30,6 +41,18 @@ RUNNER_COUNT=4
 RUNNER_PREFIX="air-m1-"
 LABELS="self-hosted,macOS,ARM64,air-m1"
 # -----------------------------------------------------------------------------
+
+RUNNER_COUNT="${1:-$RUNNER_COUNT}"
+case "$RUNNER_COUNT" in
+  ''|*[!0-9]*) RUNNER_COUNT=0 ;;
+esac
+# Read the count as a decimal number. This rejects "00" and removes leading
+# zeros, so "seq 1 00" cannot count down to 0.
+RUNNER_COUNT=$((10#$RUNNER_COUNT))
+if [ "$RUNNER_COUNT" -lt 1 ]; then
+  echo "Usage: $0 [runner-count]  (a whole number, 1 or more)" >&2
+  exit 2
+fi
 
 BIN_DIR="$HOME/bin"
 AGENTS="$HOME/Library/LaunchAgents"
@@ -66,6 +89,58 @@ sudo launchctl bootout system/com.ben.caffeinate 2>/dev/null || true
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.ben.caffeinate.plist
 
 echo "== Runners =="
+# Remove the runners with a number above RUNNER_COUNT.
+extras=()
+for dir in "$HOME"/actions-runner-*; do
+  [ -d "$dir" ] || continue
+  i=${dir##*/actions-runner-}
+  case "$i" in ''|*[!0-9]*) continue ;; esac
+  [ "$i" -gt "$RUNNER_COUNT" ] && extras+=("$i")
+done
+
+# Runner.Worker only exists while a runner executes a job.
+stop_if_busy() {
+  if pgrep -u "$(id -u)" -f "$HOME/actions-runner-$1/bin/Runner.Worker" >/dev/null; then
+    echo "$RUNNER_PREFIX$1 is busy with a job. Wait for it to finish, then run this script again." >&2
+    exit 1
+  fi
+}
+
+# Check all the extra runners before the script changes anything.
+need_remove_token=0
+for i in ${extras[@]+"${extras[@]}"}; do
+  dir="$HOME/actions-runner-$i"
+  stop_if_busy "$i"
+  [ -f "$dir/.runner" ] && need_remove_token=1
+done
+if [ "$need_remove_token" = 1 ] && [ -z "${REMOVE_TOKEN:-}" ]; then
+  read -rsp "Removal token for $RUNNER_URL: " REMOVE_TOKEN; echo
+fi
+
+for i in ${extras[@]+"${extras[@]}"}; do
+  name="$RUNNER_PREFIX$i"
+  dir="$HOME/actions-runner-$i"
+  # Check again. The runner can accept a job while the script waits for the token.
+  stop_if_busy "$i"
+  (
+    cd "$dir"
+    # svc.sh install writes .service, so the file shows that the LaunchAgent exists.
+    if [ -f .service ]; then
+      # Undo runners-stop.sh --persist. A disabled label blocks a later runner
+      # with the same name.
+      launchctl enable "gui/$(id -u)/$(basename "$(cat .service)" .plist)" || true
+      ./svc.sh stop || true
+      ./svc.sh uninstall
+    fi
+    if [ -f .runner ]; then
+      ./config.sh remove --token "$REMOVE_TOKEN"
+    fi
+  )
+  rm -rf "$dir"
+  rm -f "$HOME/.runner-watchdog/$name.strikes"
+  echo "removed $name"
+done
+
 ARCH=osx-arm64
 # Latest version from the unauthenticated releases redirect (no API, no token).
 VER=$(curl -fsSI https://github.com/actions/runner/releases/latest \
