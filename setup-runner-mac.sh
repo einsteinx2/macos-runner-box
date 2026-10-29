@@ -152,9 +152,17 @@ VER=$(curl -fsSI https://github.com/actions/runner/releases/latest \
   | awk -F'/tag/v' 'tolower($0) ~ /^location:/ {print $2}' | tr -d '\r\n')
 [ -n "$VER" ] || { echo "Could not determine runner version"; exit 1; }
 TARBALL="/tmp/actions-runner-$ARCH-$VER.tar.gz"
+# A download cut off by an earlier run leaves a truncated cache; discard it.
+if [ -f "$TARBALL" ] && ! gzip -t "$TARBALL" 2>/dev/null; then
+  echo "Cached $TARBALL is corrupt — downloading again"
+  rm -f "$TARBALL"
+fi
 if [ ! -f "$TARBALL" ]; then
-  curl -fsSL -o "$TARBALL" \
+  # Download to a temporary name so an interrupted transfer never becomes the cache.
+  curl -fsSL -o "$TARBALL.part" \
     "https://github.com/actions/runner/releases/download/v$VER/actions-runner-$ARCH-$VER.tar.gz"
+  gzip -t "$TARBALL.part" || { echo "Downloaded runner tarball is corrupt"; rm -f "$TARBALL.part"; exit 1; }
+  mv "$TARBALL.part" "$TARBALL"
 fi
 
 need_token=0
