@@ -82,3 +82,25 @@ for r in json.load(sys.stdin).get("runners", []):
     if r["name"].startswith(prefix):
         print(r["name"], r["status"], str(r["busy"]).lower())
 ' "$PREFIX")
+
+# GitHub deletes a runner that stays offline for too long. A restart cannot
+# fix that, so log each local runner whose ID is not on GitHub. Skip the check
+# if GitHub has more runners than this one page holds.
+while read -r name; do
+  log "$name: not registered on GitHub (deleted?); run setup-runner-mac.sh again to register it"
+done < <(printf '%s' "$body" | python3 -c '
+import glob, json, os, sys
+d = json.load(sys.stdin)
+runners = d.get("runners", [])
+if d.get("total_count", 0) > len(runners):
+    sys.exit()
+ids = {r["id"] for r in runners}
+for f in sorted(glob.glob(os.path.expanduser("~/actions-runner-*/.runner"))):
+    try:
+        r = json.load(open(f, encoding="utf-8-sig"))
+    except Exception:
+        continue
+    # A .runner without agentId is not a registration to check.
+    if "agentId" in r and r["agentId"] not in ids:
+        print(r.get("agentName", f))
+')
