@@ -5,6 +5,7 @@
 #
 # Run as the user that will own the runners; it sudos for the power settings
 # and the caffeinate daemon. Safe to re-run — configured runners are skipped.
+# A runner that GitHub deleted (after a long time offline) is registered again.
 #
 # Usage: ./setup-runner-mac.sh [runner-count]
 # A re-run reconciles the host to the runner count: it adds the missing
@@ -28,7 +29,9 @@
 #   org runners:  Organization permissions -> Self-hosted runners: Read-only
 #   repo runners: Repository permissions   -> Administration: Read-only
 # The script prompts for it and stores it in ~/.runner-watchdog/token (mode 600).
-# Pass WATCHDOG_TOKEN=... to skip the prompt. Skipped if the file already exists.
+# Pass WATCHDOG_TOKEN=... to skip the prompt; it replaces a stored token. If the
+# file exists, the script uses it, and asks for a new token if GitHub rejects it.
+# The script also uses this token to find the runners that GitHub deleted.
 #
 # Put runner-watchdog.sh next to this script.
 
@@ -88,6 +91,76 @@ sudo chmod 644 /Library/LaunchDaemons/com.ben.caffeinate.plist
 sudo launchctl bootout system/com.ben.caffeinate 2>/dev/null || true
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.ben.caffeinate.plist
 
+echo "== Watchdog token =="
+TOKEN_DIR="$HOME/.runner-watchdog"
+mkdir -p "$TOKEN_DIR"; chmod 700 "$TOKEN_DIR"
+# WATCHDOG_TOKEN replaces a stored token, so a new token needs no prompt.
+if [ -n "${WATCHDOG_TOKEN:-}" ]; then
+  printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
+elif [ ! -s "$TOKEN_DIR/token" ]; then
+  read -rsp "Watchdog PAT (read-only self-hosted runners): " WATCHDOG_TOKEN; echo
+  printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
+fi
+chmod 600 "$TOKEN_DIR/token"
+
+# Set GITHUB_IDS to the IDs of all the runners in SCOPE, one per line, and
+# API_CODE to the HTTP status of the last request. Return 1 if a request fails.
+fetch_runner_ids() {
+  local page=1 resp out total
+  GITHUB_IDS=""
+  while :; do
+    resp=$(curl -sS --max-time 20 -w '\n%{http_code}' \
+      -H "Authorization: Bearer $(tr -d '[:space:]' < "$TOKEN_DIR/token")" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "https://api.github.com/$SCOPE/actions/runners?per_page=100&page=$page" 2>/dev/null) \
+      || { API_CODE=000; return 1; }
+    API_CODE=${resp##*$'\n'}
+    [ "$API_CODE" = 200 ] || return 1
+    # The first line is total_count. The other lines are the runner IDs.
+    out=$(printf '%s' "${resp%$'\n'*}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d.get("total_count", 0))
+for r in d.get("runners", []):
+    print(r["id"])
+') || { API_CODE=parse; return 1; }
+    total=$(printf '%s\n' "$out" | head -1)
+    GITHUB_IDS+="$(printf '%s\n' "$out" | tail -n +2)"$'\n'
+    [ $((page * 100)) -ge "$total" ] && return 0
+    page=$((page + 1))
+  done
+}
+
+# A fine-grained PAT expires. If GitHub rejects the stored token, ask for a new one.
+if ! fetch_runner_ids && { [ "$API_CODE" = 401 ] || [ "$API_CODE" = 403 ]; }; then
+  echo "GitHub rejected the watchdog token (HTTP $API_CODE). It may have expired."
+  read -rsp "New watchdog PAT (read-only self-hosted runners): " WATCHDOG_TOKEN; echo
+  printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
+  fetch_runner_ids || true
+fi
+if [ "$API_CODE" != "200" ]; then
+  echo "Token check failed: HTTP $API_CODE for $SCOPE/actions/runners (000 = GitHub unreachable, 401/403 = bad token, 404 = wrong SCOPE or missing permission)"
+  exit 1
+fi
+
+# GitHub deletes a runner that stays offline for too long. The runner
+# directory still holds the old registration, so the script cannot skip it.
+# Return 0 if runner $1 is configured here but GitHub has no runner with its ID.
+is_deleted_on_github() {
+  local runner_file="$HOME/actions-runner-$1/.runner" id
+  [ -f "$runner_file" ] || return 1
+  # The runner writes .runner with a UTF-8 BOM. If the file is unreadable,
+  # keep the runner: a false "deleted" would clear a good registration.
+  id=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentId"])
+' "$runner_file" 2>/dev/null) || return 1
+  # A here-string, not a pipe: with pipefail, an early grep -q exit can make
+  # the pipe fail and mark a live runner as deleted.
+  ! grep -qx "$id" <<< "$GITHUB_IDS"
+}
+
 echo "== Runners =="
 # Remove the runners with a number above RUNNER_COUNT.
 extras=()
@@ -116,7 +189,10 @@ need_remove_token=0
 for i in ${extras[@]+"${extras[@]}"}; do
   dir="$HOME/actions-runner-$i"
   stop_if_busy "$i"
-  [ -f "$dir/.runner" ] && need_remove_token=1
+  # A runner that GitHub deleted needs no removal on GitHub.
+  if [ -f "$dir/.runner" ] && ! is_deleted_on_github "$i"; then
+    need_remove_token=1
+  fi
 done
 if [ "$need_remove_token" = 1 ] && [ -z "${REMOVE_TOKEN:-}" ]; then
   read -rsp "Removal token for $RUNNER_URL: " REMOVE_TOKEN; echo
@@ -127,6 +203,8 @@ for i in ${extras[@]+"${extras[@]}"}; do
   dir="$HOME/actions-runner-$i"
   # Check again. The runner can accept a job while the script waits for the token.
   stop_if_busy "$i"
+  deleted=0
+  if is_deleted_on_github "$i"; then deleted=1; fi
   (
     cd "$dir"
     # svc.sh install writes .service, so the file shows that the LaunchAgent exists.
@@ -137,7 +215,7 @@ for i in ${extras[@]+"${extras[@]}"}; do
       ./svc.sh stop || true
       ./svc.sh uninstall
     fi
-    if [ -f .runner ]; then
+    if [ -f .runner ] && [ "$deleted" = 0 ]; then
       ./config.sh remove --token "$REMOVE_TOKEN"
     fi
   )
@@ -164,6 +242,26 @@ if [ ! -f "$TARBALL" ]; then
   gzip -t "$TARBALL.part" || { echo "Downloaded runner tarball is corrupt"; rm -f "$TARBALL.part"; exit 1; }
   mv "$TARBALL.part" "$TARBALL"
 fi
+
+# Clear the local registration of each runner that GitHub deleted. The loop
+# below then registers it again under the same name and keeps its files.
+for i in $(seq 1 "$RUNNER_COUNT"); do
+  is_deleted_on_github "$i" || continue
+  name="$RUNNER_PREFIX$i"
+  echo "$name is configured here, but GitHub deleted it — clearing the local registration"
+  stop_if_busy "$i"
+  (
+    cd "$HOME/actions-runner-$i"
+    # svc.sh install fails while the old plist exists, so remove the service too.
+    if [ -f .service ]; then
+      launchctl enable "gui/$(id -u)/$(basename "$(cat .service)" .plist)" || true
+      ./svc.sh stop || true
+      ./svc.sh uninstall
+    fi
+    rm -f .runner .credentials .credentials_rsaparams .service
+  )
+  rm -f "$HOME/.runner-watchdog/$name.strikes"
+done
 
 need_token=0
 for i in $(seq 1 "$RUNNER_COUNT"); do
@@ -207,26 +305,6 @@ sed -i '' \
   -e "s|^SCOPE=.*|SCOPE=\"$SCOPE\"|" \
   -e "s|^PREFIX=.*|PREFIX=\"$RUNNER_PREFIX\"|" \
   "$BIN_DIR/runner-watchdog.sh"
-
-TOKEN_DIR="$HOME/.runner-watchdog"
-mkdir -p "$TOKEN_DIR"; chmod 700 "$TOKEN_DIR"
-if [ ! -s "$TOKEN_DIR/token" ]; then
-  if [ -z "${WATCHDOG_TOKEN:-}" ]; then
-    read -rsp "Watchdog PAT (read-only self-hosted runners): " WATCHDOG_TOKEN; echo
-  fi
-  printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
-fi
-chmod 600 "$TOKEN_DIR/token"
-
-# Sanity-check the token/scope before wiring up the agent.
-code=$(curl -s -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $(cat "$TOKEN_DIR/token")" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/$SCOPE/actions/runners?per_page=1")
-if [ "$code" != "200" ]; then
-  echo "Token check failed: HTTP $code for $SCOPE/actions/runners (401/403 = bad token, 404 = wrong SCOPE or missing permission)"
-  exit 1
-fi
 
 cat > "$AGENTS/com.ben.runner-watchdog.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

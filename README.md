@@ -21,6 +21,12 @@ Run `./setup-runner-mac.sh <count>` on the Mac, or edit `RUNNER_COUNT` in the sc
 
 The argument is not saved. A later run without the argument uses `RUNNER_COUNT` from the script, so edit the script to make the count permanent.
 
+## Runners that GitHub deleted
+
+GitHub deletes a self-hosted runner that stays offline for too long, for example while the Mac is off for a week or two. The watchdog logs `not registered on GitHub` for such a runner. To register it again, run `./setup-runner-mac.sh` with a new registration token. The script compares the runner IDs on the Mac with the runners on GitHub, clears the old registration of each deleted runner, and registers it again under the same name.
+
+If GitHub rejects the stored watchdog token (a fine-grained PAT expires), the script asks for a new one. You can also pass `WATCHDOG_TOKEN=...` to replace it.
+
 ## Pausing the runners
 
 To take the runners offline without shutting down the Mac, run `./runners-stop.sh`. It stops the watchdog first, because the watchdog otherwise restarts runners that GitHub reports as offline. The script refuses to stop while a runner is in the middle of a job; pass `--force` to stop anyway (that job fails). The services come back at the next login unless you also pass `--persist`, which disables them until you start them again.
