@@ -95,7 +95,12 @@ runners = d.get("runners", [])
 if d.get("total_count", 0) > len(runners):
     sys.exit()
 ids = {r["id"] for r in runners}
-for f in sorted(glob.glob(os.path.expanduser("~/actions-runner-*/.runner"))):
+for rdir in sorted(glob.glob(os.path.expanduser("~/actions-runner-*"))):
+    # Newer runners also write .runner_migrated; use it if .runner is missing.
+    f = next((os.path.join(rdir, n) for n in (".runner", ".runner_migrated")
+              if os.path.isfile(os.path.join(rdir, n))), None)
+    if f is None:
+        continue
     try:
         r = json.load(open(f, encoding="utf-8-sig"))
     except Exception:

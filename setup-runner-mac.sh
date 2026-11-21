@@ -144,12 +144,27 @@ if [ "$API_CODE" != "200" ]; then
   exit 1
 fi
 
+# Newer runners also write .runner_migrated. config.sh refuses to configure a
+# runner while .runner or .runner_migrated exists, so check both.
+# Print the config file of runner $1, or return 1 if the runner has none.
+runner_config() {
+  local f
+  for f in .runner .runner_migrated; do
+    if [ -f "$HOME/actions-runner-$1/$f" ]; then
+      echo "$HOME/actions-runner-$1/$f"
+      return 0
+    fi
+  done
+  return 1
+}
+is_configured() { runner_config "$1" >/dev/null; }
+
 # GitHub deletes a runner that stays offline for too long. The runner
 # directory still holds the old registration, so the script cannot skip it.
 # Return 0 if runner $1 is configured here but GitHub has no runner with its ID.
 is_deleted_on_github() {
-  local runner_file="$HOME/actions-runner-$1/.runner" id
-  [ -f "$runner_file" ] || return 1
+  local runner_file id
+  runner_file=$(runner_config "$1") || return 1
   # The runner writes .runner with a UTF-8 BOM. If the file is unreadable,
   # keep the runner: a false "deleted" would clear a good registration.
   id=$(python3 -c '
@@ -190,7 +205,7 @@ for i in ${extras[@]+"${extras[@]}"}; do
   dir="$HOME/actions-runner-$i"
   stop_if_busy "$i"
   # A runner that GitHub deleted needs no removal on GitHub.
-  if [ -f "$dir/.runner" ] && ! is_deleted_on_github "$i"; then
+  if is_configured "$i" && ! is_deleted_on_github "$i"; then
     need_remove_token=1
   fi
 done
@@ -203,8 +218,8 @@ for i in ${extras[@]+"${extras[@]}"}; do
   dir="$HOME/actions-runner-$i"
   # Check again. The runner can accept a job while the script waits for the token.
   stop_if_busy "$i"
-  deleted=0
-  if is_deleted_on_github "$i"; then deleted=1; fi
+  remove=0
+  if is_configured "$i" && ! is_deleted_on_github "$i"; then remove=1; fi
   (
     cd "$dir"
     # svc.sh install writes .service, so the file shows that the LaunchAgent exists.
@@ -215,7 +230,7 @@ for i in ${extras[@]+"${extras[@]}"}; do
       ./svc.sh stop || true
       ./svc.sh uninstall
     fi
-    if [ -f .runner ] && [ "$deleted" = 0 ]; then
+    if [ "$remove" = 1 ]; then
       ./config.sh remove --token "$REMOVE_TOKEN"
     fi
   )
@@ -258,14 +273,15 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
       ./svc.sh stop || true
       ./svc.sh uninstall
     fi
-    rm -f .runner .credentials .credentials_rsaparams .service
+    rm -f .runner .runner_migrated .credentials .credentials_migrated \
+      .credentials_rsaparams .service
   )
   rm -f "$HOME/.runner-watchdog/$name.strikes"
 done
 
 need_token=0
 for i in $(seq 1 "$RUNNER_COUNT"); do
-  [ -f "$HOME/actions-runner-$i/.runner" ] || need_token=1
+  is_configured "$i" || need_token=1
 done
 if [ "$need_token" = 1 ] && [ -z "${REG_TOKEN:-}" ]; then
   read -rsp "Registration token for $RUNNER_URL: " REG_TOKEN; echo
@@ -274,13 +290,15 @@ fi
 for i in $(seq 1 "$RUNNER_COUNT"); do
   name="$RUNNER_PREFIX$i"
   dir="$HOME/actions-runner-$i"
-  # svc.sh install writes .service. A runner with .runner but no .service is
+  # svc.sh install writes .service. A configured runner with no .service is
   # registered but has no LaunchAgent, because an earlier run failed after config.sh.
-  if [ -f "$dir/.runner" ] && [ -f "$dir/.service" ]; then
+  configured=0
+  if is_configured "$i"; then configured=1; fi
+  if [ "$configured" = 1 ] && [ -f "$dir/.service" ]; then
     echo "$name already configured in $dir — skipping"
     continue
   fi
-  if [ -f "$dir/.runner" ]; then
+  if [ "$configured" = 1 ]; then
     echo "$name is registered but has no service — installing the service"
   else
     mkdir -p "$dir"
@@ -288,7 +306,7 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
   fi
   (
     cd "$dir"
-    if [ ! -f .runner ]; then
+    if [ "$configured" = 0 ]; then
       ./config.sh --url "$RUNNER_URL" --token "$REG_TOKEN" --name "$name" \
         --labels "$LABELS" --unattended --replace
     fi
