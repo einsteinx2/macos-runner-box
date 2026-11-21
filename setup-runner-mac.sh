@@ -61,6 +61,24 @@ BIN_DIR="$HOME/bin"
 AGENTS="$HOME/Library/LaunchAgents"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Ask for a secret with the prompt $2 and store it in the variable $1. The
+# input is hidden, so an empty paste is easy to miss: ask again until the
+# answer is not empty. Remove whitespace, which a token never contains.
+prompt_secret() {
+  local value
+  while :; do
+    # At end of input, stop: without this, the loop never ends.
+    if ! read -rsp "$2: " value; then
+      echo; echo "No input for: $2" >&2; exit 1
+    fi
+    echo
+    value=$(printf '%s' "$value" | tr -d '[:space:]')
+    [ -n "$value" ] && break
+    echo "The answer is empty. Paste it again." >&2
+  done
+  printf -v "$1" '%s' "$value"
+}
+
 echo "== Power: never sleep, even with the lid closed =="
 # disablesleep 1 is what lets a laptop stay awake with the lid closed and no
 # external display. Everything else is belt-and-suspenders.
@@ -98,7 +116,7 @@ mkdir -p "$TOKEN_DIR"; chmod 700 "$TOKEN_DIR"
 if [ -n "${WATCHDOG_TOKEN:-}" ]; then
   printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
 elif [ ! -s "$TOKEN_DIR/token" ]; then
-  read -rsp "Watchdog PAT (read-only self-hosted runners): " WATCHDOG_TOKEN; echo
+  prompt_secret WATCHDOG_TOKEN "Watchdog PAT (read-only self-hosted runners)"
   printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
 fi
 chmod 600 "$TOKEN_DIR/token"
@@ -135,7 +153,7 @@ for r in d.get("runners", []):
 # A fine-grained PAT expires. If GitHub rejects the stored token, ask for a new one.
 if ! fetch_runner_ids && { [ "$API_CODE" = 401 ] || [ "$API_CODE" = 403 ]; }; then
   echo "GitHub rejected the watchdog token (HTTP $API_CODE). It may have expired."
-  read -rsp "New watchdog PAT (read-only self-hosted runners): " WATCHDOG_TOKEN; echo
+  prompt_secret WATCHDOG_TOKEN "New watchdog PAT (read-only self-hosted runners)"
   printf '%s\n' "$WATCHDOG_TOKEN" > "$TOKEN_DIR/token"
   fetch_runner_ids || true
 fi
@@ -210,7 +228,7 @@ for i in ${extras[@]+"${extras[@]}"}; do
   fi
 done
 if [ "$need_remove_token" = 1 ] && [ -z "${REMOVE_TOKEN:-}" ]; then
-  read -rsp "Removal token for $RUNNER_URL: " REMOVE_TOKEN; echo
+  prompt_secret REMOVE_TOKEN "Removal token for $RUNNER_URL"
 fi
 
 for i in ${extras[@]+"${extras[@]}"}; do
@@ -284,7 +302,7 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
   is_configured "$i" || need_token=1
 done
 if [ "$need_token" = 1 ] && [ -z "${REG_TOKEN:-}" ]; then
-  read -rsp "Registration token for $RUNNER_URL: " REG_TOKEN; echo
+  prompt_secret REG_TOKEN "Registration token for $RUNNER_URL"
 fi
 
 for i in $(seq 1 "$RUNNER_COUNT"); do
